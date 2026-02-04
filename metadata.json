@@ -1,0 +1,7 @@
+{
+  "name": "Family 100 - Seru Abis!",
+  "description": "Game tebak-tebakan ala Family 100 dengan pertanyaan seputar kehidupan sehari-hari, desain bubble yang lucu, dan sistem skor kompetitif.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
