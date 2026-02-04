@@ -3,13 +3,13 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GameScreen, Player, TargetScore, Question, GameState, GameMessage } from './types';
 import { BubbleCard, BubbleButton } from './components/BubbleCard';
 import { generateDailyQuestion, checkAnswerSimilarity } from './services/geminiService';
-import { Peer, DataConnection } from 'peerjs';
+import Peer, { DataConnection } from 'peerjs';
 
 const App: React.FC = () => {
   const [screen, setScreen] = useState<GameScreen>(GameScreen.ENTRY);
-  const [isJoining, setIsJoining] = useState(false); // Sub-state untuk layar input kode
-  const [roomId, setRoomId] = useState(''); // Kode Room (ID Host)
-  const [inputRoomId, setInputRoomId] = useState(''); // Input sementara untuk join
+  const [isJoining, setIsJoining] = useState(false);
+  const [roomId, setRoomId] = useState('');
+  const [inputRoomId, setInputRoomId] = useState('');
   const [myPlayerName, setMyPlayerName] = useState('');
   const [isHost, setIsHost] = useState(false);
   const [players, setPlayers] = useState<Player[]>([]);
@@ -25,7 +25,6 @@ const App: React.FC = () => {
   const peerRef = useRef<Peer | null>(null);
   const connectionsRef = useRef<DataConnection[]>([]);
   
-  // Broadcast state ke semua client (Hanya Host)
   const broadcastState = useCallback((overrides: Partial<GameState> = {}) => {
     if (!isHost) return;
     const currentState: GameState = {
@@ -50,7 +49,7 @@ const App: React.FC = () => {
     }
   }, [players, targetScore, currentPlayerIdx, currentQuestion, screen, winner, isHost, broadcastState]);
 
-  const handleIncomingData = async (data: any, conn?: DataConnection) => {
+  const handleIncomingData = async (data: any) => {
     const msg = data as GameMessage;
     if (msg.type === 'STATE_UPDATE') {
       const s = msg.state;
@@ -65,7 +64,6 @@ const App: React.FC = () => {
     else if (msg.type === 'JOIN_REQUEST' && isHost) {
       setPlayers(prev => {
         if (prev.length >= 5) return prev;
-        // Cek jika pemain sudah ada
         if (prev.find(p => p.id === msg.id)) return prev;
         return [...prev, { id: msg.id, name: msg.name, score: 0 }];
       });
@@ -80,6 +78,7 @@ const App: React.FC = () => {
     setIsHost(true);
     setConnStatus('connecting');
     
+    // PeerJS secara otomatis menggunakan server awan gratis jika tidak ada opsi yang diberikan
     const peer = new Peer();
     peerRef.current = peer;
 
@@ -93,19 +92,18 @@ const App: React.FC = () => {
     peer.on('connection', (conn) => {
       conn.on('open', () => {
         connectionsRef.current.push(conn);
-        // Kirim state awal segera setelah koneksi terbuka
         const currentState: GameState = {
           players, targetScore, currentPlayerIdx, currentQuestion, screen, winner
         };
         conn.send({ type: 'STATE_UPDATE', state: currentState });
       });
-      conn.on('data', (data) => handleIncomingData(data, conn));
+      conn.on('data', (data) => handleIncomingData(data));
     });
 
     peer.on('error', (err) => {
-      console.error(err);
+      console.error("Peer Error:", err);
       setConnStatus('error');
-      alert("Error koneksi PeerJS. Coba lagi.");
+      alert("Error koneksi PeerJS. Pastikan internet stabil.");
     });
   };
 
@@ -133,11 +131,12 @@ const App: React.FC = () => {
       
       conn.on('error', (err) => {
         setConnStatus('error');
-        alert("Gagal menyambung ke room. Periksa kode room!");
+        alert("Gagal menyambung. Kode room mungkin salah atau Host sudah keluar.");
       });
     });
 
     peer.on('error', (err) => {
+      console.error("Peer Error:", err);
       setConnStatus('error');
       alert("Koneksi gagal. Coba lagi.");
     });
@@ -212,11 +211,15 @@ const App: React.FC = () => {
     if (isHost) {
       processAnswer(userInput, roomId);
     } else {
-      connectionsRef.current[0].send({ 
-        type: 'SUBMIT_ANSWER', 
-        answer: userInput, 
-        playerId: peerRef.current?.id 
-      });
+      if (connectionsRef.current[0] && connectionsRef.current[0].open) {
+        connectionsRef.current[0].send({ 
+          type: 'SUBMIT_ANSWER', 
+          answer: userInput, 
+          playerId: peerRef.current?.id 
+        });
+      } else {
+        alert("Koneksi terputus dari Host!");
+      }
     }
     setUserInput('');
   };
@@ -252,17 +255,17 @@ const App: React.FC = () => {
       )}
 
       {screen === GameScreen.ENTRY && isJoining && (
-        <BubbleCard className="text-center animate-in slide-in-from-right duration-300">
-          <button onClick={() => setIsJoining(false)} className="absolute left-6 top-6 text-gray-400 font-bold">← Kembali</button>
+        <BubbleCard className="text-center animate-in slide-in-from-right duration-300 relative">
+          <button onClick={() => setIsJoining(false)} className="absolute left-6 top-6 text-gray-400 font-bold">←</button>
           <h2 className="text-2xl font-bold text-gray-800 mb-2 mt-4">Gabung Room</h2>
-          <p className="text-gray-500 mb-6 italic">Minta kode room dari temanmu</p>
+          <p className="text-gray-500 mb-6 italic">Masukkan kode dari temanmu</p>
           
           <input
             autoFocus
             type="text"
             value={inputRoomId}
             onChange={(e) => setInputRoomId(e.target.value.toLowerCase())}
-            placeholder="Masukkan Kode Room..."
+            placeholder="Kode Room..."
             className="w-full bg-blue-50 border-4 border-blue-100 p-5 rounded-[2rem] text-2xl font-fredoka mb-6 text-center focus:border-blue-300 outline-none uppercase tracking-widest"
           />
           
@@ -272,7 +275,7 @@ const App: React.FC = () => {
             variant="secondary" 
             className="w-full text-xl py-4"
           >
-            {connStatus === 'connecting' ? 'Mencari Room...' : 'Cari Room 🔍'}
+            {connStatus === 'connecting' ? 'Mencari...' : 'Cari Room 🔍'}
           </BubbleButton>
         </BubbleCard>
       )}
@@ -280,27 +283,25 @@ const App: React.FC = () => {
       {screen === GameScreen.LOBBY && (
         <BubbleCard className="animate-in fade-in duration-500">
           <div className="text-center mb-8">
-            <p className="text-sm font-bold text-gray-400 uppercase tracking-widest">Kode Room Anda:</p>
+            <p className="text-sm font-bold text-gray-400 uppercase tracking-widest">Kode Room:</p>
             <div className="flex items-center justify-center gap-3 mt-2">
               <h2 className="text-4xl md:text-5xl font-fredoka text-blue-500 bg-blue-50 py-4 px-8 rounded-3xl border-4 border-blue-200">
                 {roomId || '...'}
               </h2>
             </div>
-            <p className="text-gray-500 mt-4 font-semibold">Tunggu temanmu bergabung!</p>
           </div>
 
           <div className="space-y-6">
             <div>
-              <label className="block text-sm font-bold text-gray-500 mb-2 uppercase">Pemain Terhubung ({players.length}/5)</label>
+              <label className="block text-sm font-bold text-gray-500 mb-2 uppercase text-center">Pemain ({players.length}/5)</label>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {players.map((p) => (
-                  <div key={p.id} className="flex items-center gap-3 bg-gray-50 p-4 rounded-2xl border-2 border-gray-100 animate-in slide-in-from-left">
+                  <div key={p.id} className="flex items-center gap-3 bg-gray-50 p-4 rounded-2xl border-2 border-gray-100">
                     <div className="w-10 h-10 bg-yellow-400 rounded-full flex items-center justify-center font-bold text-yellow-900 border-2 border-white">
                       {p.name[0]}
                     </div>
                     <span className="font-bold text-gray-700 truncate">
                       {p.name} {p.id === roomId && '👑'}
-                      {p.id === peerRef.current?.id && <span className="text-xs text-blue-400 ml-1">(Anda)</span>}
                     </span>
                   </div>
                 ))}
@@ -310,13 +311,13 @@ const App: React.FC = () => {
             {isHost ? (
               <div className="space-y-4 pt-4 border-t-2 border-gray-50">
                  <div>
-                  <label className="block text-sm font-bold text-gray-500 mb-2 uppercase text-center">Pilih Target Skor</label>
+                  <label className="block text-sm font-bold text-gray-500 mb-2 uppercase text-center">Target Menang</label>
                   <div className="flex gap-2">
                     {[30, 50, 100].map(s => (
                       <button 
                         key={s} 
                         onClick={() => setTargetScore(s as TargetScore)}
-                        className={`flex-1 p-3 rounded-xl font-bold border-2 transition-all ${targetScore === s ? 'bg-blue-500 text-white border-blue-600 scale-105' : 'bg-white border-gray-100 text-gray-400'}`}
+                        className={`flex-1 p-3 rounded-xl font-bold border-2 transition-all ${targetScore === s ? 'bg-blue-500 text-white border-blue-600' : 'bg-white border-gray-100 text-gray-400'}`}
                       >
                         {s} Pts
                       </button>
@@ -324,13 +325,12 @@ const App: React.FC = () => {
                   </div>
                 </div>
                 <BubbleButton onClick={startGame} className="w-full text-xl py-5" disabled={players.length < 2 || isLoading}>
-                  {isLoading ? 'Menyiapkan...' : `Mulai Game! (${players.length}/2)`}
+                  Mulai Game!
                 </BubbleButton>
               </div>
             ) : (
               <div className="text-center p-8 bg-yellow-50 rounded-[2.5rem] animate-pulse-soft border-4 border-yellow-100">
-                <p className="font-bold text-yellow-700 text-lg italic">Menunggu Host memulai...</p>
-                <p className="text-xs text-yellow-600 mt-1 opacity-60">Pastikan semua temanmu sudah masuk</p>
+                <p className="font-bold text-yellow-700">Menunggu Host...</p>
               </div>
             )}
           </div>
@@ -339,20 +339,19 @@ const App: React.FC = () => {
 
       {screen === GameScreen.PLAYING && currentQuestion && (
         <div className="space-y-6 animate-in slide-in-from-bottom duration-500">
-          <div className="flex flex-wrap gap-2 md:gap-4 justify-center">
+          <div className="flex flex-wrap gap-2 justify-center">
             {players.map((p, i) => (
               <div 
                 key={p.id} 
                 className={`
-                  p-3 md:p-4 rounded-[1.5rem] md:rounded-[2rem] border-4 transition-all flex flex-col items-center min-w-[100px] md:min-w-[120px]
+                  p-3 rounded-[1.5rem] border-4 transition-all flex flex-col items-center min-w-[100px]
                   ${currentPlayerIdx === i 
-                    ? 'bg-yellow-100 border-yellow-400 scale-110 bubble-shadow z-10' 
-                    : 'bg-white bg-opacity-60 border-white text-gray-400 opacity-70'}
+                    ? 'bg-yellow-100 border-yellow-400 scale-105 shadow-md' 
+                    : 'bg-white opacity-60 border-white'}
                 `}
               >
-                <span className="text-[10px] font-bold uppercase mb-1">{p.id === peerRef.current?.id ? 'SAYA' : `PLAYER ${i+1}`}</span>
-                <span className="font-fredoka text-base md:text-lg truncate w-full text-center">{p.name}</span>
-                <span className="bg-white px-3 py-1 rounded-full text-xs font-bold mt-2 text-blue-600 shadow-sm">
+                <span className="font-fredoka text-base truncate w-full text-center">{p.name}</span>
+                <span className="bg-white px-3 py-1 rounded-full text-xs font-bold mt-1 text-blue-600">
                   {p.score} pts
                 </span>
               </div>
@@ -360,33 +359,33 @@ const App: React.FC = () => {
           </div>
 
           <BubbleCard>
-            <div className="text-center mb-8">
-              <p className="text-gray-800 text-xl md:text-3xl font-bold leading-tight px-2">
+            <div className="text-center mb-6">
+              <p className="text-gray-800 text-xl md:text-2xl font-bold leading-tight">
                 "{currentQuestion.prompt}"
               </p>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-8">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-6">
               {currentQuestion.answers.map((ans, idx) => (
                 <div 
                   key={idx}
                   className={`
-                    relative h-12 md:h-14 rounded-2xl flex items-center justify-between px-6 font-bold overflow-hidden
-                    ${ans.revealed ? 'bg-blue-500 text-white' : 'bg-gray-100 text-gray-300'}
-                    border-2 ${ans.revealed ? 'border-blue-600' : 'border-gray-200'} transition-all duration-500
+                    relative h-12 rounded-xl flex items-center justify-between px-6 font-bold overflow-hidden
+                    ${ans.revealed ? 'bg-blue-500 text-white border-blue-600' : 'bg-gray-100 text-gray-300 border-gray-200'}
+                    border-2 transition-all duration-500
                   `}
                 >
-                  <span className="bg-white bg-opacity-20 w-8 h-8 rounded-full flex items-center justify-center mr-3 text-xs">
+                  <span className="bg-white bg-opacity-20 w-6 h-6 rounded-full flex items-center justify-center mr-3 text-[10px]">
                     {idx + 1}
                   </span>
-                  <span className="flex-1 truncate uppercase text-sm md:text-base">
+                  <span className="flex-1 truncate uppercase text-sm">
                     {ans.revealed ? ans.text : '••••••••••••'}
                   </span>
                 </div>
               ))}
             </div>
 
-            {players[currentPlayerIdx].id === peerRef.current?.id ? (
+            {(players[currentPlayerIdx].id === peerRef.current?.id || (isHost && currentPlayerIdx === 0)) ? (
               <form onSubmit={handleClientSubmit} className="relative">
                 <input
                   autoFocus
@@ -394,66 +393,39 @@ const App: React.FC = () => {
                   value={userInput}
                   onChange={(e) => setUserInput(e.target.value)}
                   placeholder="Ketik jawabanmu..."
-                  className="w-full bg-yellow-50 border-4 border-yellow-200 p-4 md:p-5 rounded-[2rem] text-lg md:text-xl font-bold text-gray-700 outline-none focus:border-yellow-400 transition-all shadow-inner"
+                  className="w-full bg-yellow-50 border-4 border-yellow-200 p-4 rounded-[1.5rem] text-lg font-bold text-gray-700 outline-none focus:border-yellow-400"
                 />
                 <div className="absolute right-2 top-2 bottom-2">
-                  <BubbleButton disabled={isLoading} className="h-full px-6">KIRIM</BubbleButton>
+                  <BubbleButton disabled={isLoading} className="h-full px-6 py-0">KIRIM</BubbleButton>
                 </div>
               </form>
             ) : (
-              <div className="text-center p-6 bg-gray-50 rounded-[2rem] border-4 border-dashed border-gray-200">
-                <p className="text-gray-400 font-bold italic text-base md:text-lg">
-                  Giliran <span className="text-gray-600">{players[currentPlayerIdx].name}</span> menjawab...
+              <div className="text-center p-4 bg-gray-50 rounded-[1.5rem] border-2 border-dashed border-gray-200">
+                <p className="text-gray-400 font-bold italic">
+                  Giliran {players[currentPlayerIdx].name}...
                 </p>
               </div>
             )}
 
             {message && (
-              <div className="mt-4 text-center font-bold text-lg text-blue-600 animate-bounce">
+              <div className="mt-4 text-center font-bold text-blue-600 animate-bounce">
                 {message}
               </div>
             )}
           </BubbleCard>
-
-          <div className="flex justify-between items-center text-white px-4 font-bold text-xs md:text-sm">
-            <div className="flex items-center gap-2">
-              <span className="bg-green-400 w-3 h-3 rounded-full animate-pulse"></span>
-              ROOM: {roomId}
-            </div>
-            <div>TARGET: {targetScore} PTS</div>
-          </div>
         </div>
       )}
 
       {screen === GameScreen.WINNER && winner && (
-        <BubbleCard className="text-center animate-in zoom-in duration-500">
-          <div className="text-7xl mb-4">🏆</div>
-          <h2 className="text-3xl font-fredoka text-gray-800 mb-2">Pemenangnya!</h2>
-          <div className="bg-gradient-to-r from-yellow-400 to-orange-500 text-white p-8 rounded-[2.5rem] mb-6 inline-block shadow-lg">
-            <h3 className="text-4xl font-fredoka mb-1">{winner.name}</h3>
-            <p className="text-xl font-bold opacity-90">{winner.score} Poin</p>
-          </div>
-
-          <div className="mb-8">
-            <h4 className="text-gray-400 font-bold uppercase mb-4 tracking-widest">Papan Peringkat</h4>
-            <div className="space-y-2 max-w-sm mx-auto">
-              {[...players].sort((a, b) => b.score - a.score).map((p, i) => (
-                <div key={p.id} className="flex justify-between items-center bg-gray-50 p-4 rounded-2xl border border-gray-100">
-                  <span className="font-bold text-gray-600">#{i + 1} {p.name}</span>
-                  <span className="font-fredoka text-blue-500">{p.score} pts</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <BubbleButton onClick={() => window.location.reload()} className="w-full py-5 text-xl">
-            Tutup & Keluar Room
-          </BubbleButton>
+        <BubbleCard className="text-center animate-in zoom-in">
+          <div className="text-6xl mb-4">🏆</div>
+          <h2 className="text-2xl font-fredoka text-gray-800 mb-6">Pemenang: {winner.name}!</h2>
+          <BubbleButton onClick={() => window.location.reload()} className="w-full">Tutup Room</BubbleButton>
         </BubbleCard>
       )}
 
-      <footer className="mt-12 text-center text-white opacity-40 text-[10px] font-bold uppercase tracking-widest">
-        Koneksi: {connStatus === 'connected' ? 'Stabil ✅' : connStatus === 'connecting' ? 'Menyambungkan... ⏳' : 'Terputus ❌'}
+      <footer className="mt-12 text-center text-white opacity-40 text-[10px] font-bold">
+        Status: {connStatus === 'connected' ? 'ONLINE' : 'OFFLINE'} | Room: {roomId || '-'}
       </footer>
     </div>
   );
