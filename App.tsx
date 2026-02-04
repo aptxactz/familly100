@@ -6,14 +6,12 @@ import { generateDailyQuestion, checkAnswerSimilarity } from './services/geminiS
 import Peer, { DataConnection } from 'peerjs';
 
 // KONFIGURASI KONEKSI GLOBAL (STUN + TURN)
-// TURN Server sangat penting untuk user yang menggunakan Mobile Data / WiFi beda provider
 const PEER_CONFIG = {
   config: {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
       { urls: 'stun:stun2.l.google.com:19302' },
-      // Penambahan TURN Server (Public/Free) untuk relay data jika P2P gagal
       {
         urls: 'turn:openrelay.metered.ca:80',
         username: 'openrelayproject',
@@ -21,11 +19,6 @@ const PEER_CONFIG = {
       },
       {
         urls: 'turn:openrelay.metered.ca:443',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      },
-      {
-        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
         username: 'openrelayproject',
         credential: 'openrelayproject'
       }
@@ -65,38 +58,32 @@ const App: React.FC = () => {
   const peerRef = useRef<Peer | null>(null);
   const connectionsRef = useRef<DataConnection[]>([]);
   
-  const broadcastState = useCallback((overrides: Partial<GameState> = {}) => {
+  // Fungsi broadcast menggunakan state terbaru via functional update atau refs jika perlu, 
+  // tapi di sini kita pakai dependency array yang benar.
+  const broadcastState = useCallback((specificState?: GameState) => {
     if (!isHost) return;
-    const currentState: GameState = {
+    const currentState: GameState = specificState || {
       players,
       targetScore,
       currentPlayerIdx,
       currentQuestion,
       screen,
       winner,
-      ...overrides
     };
     
+    console.log("Broadcasting state ke", connectionsRef.current.length, "pemain");
     connectionsRef.current.forEach(conn => {
       if (conn.open) {
-        try {
-          conn.send({ type: 'STATE_UPDATE', state: currentState });
-        } catch (e) {
-          console.error("Gagal broadcast ke " + conn.peer, e);
-        }
+        conn.send({ type: 'STATE_UPDATE', state: currentState });
       }
     });
   }, [isHost, players, targetScore, currentPlayerIdx, currentQuestion, screen, winner]);
 
-  useEffect(() => {
-    if (isHost && screen !== GameScreen.ENTRY) {
-      broadcastState();
-    }
-  }, [players, targetScore, currentPlayerIdx, currentQuestion, screen, winner, isHost, broadcastState]);
-
-  const handleIncomingData = async (data: any, fromConn?: DataConnection) => {
+  const handleIncomingData = useCallback(async (data: any, fromConn?: DataConnection) => {
     const msg = data as GameMessage;
+    
     if (msg.type === 'STATE_UPDATE') {
+      console.log("Menerima update state dari Host");
       const s = msg.state;
       setPlayers(s.players);
       setTargetScore(s.targetScore);
@@ -108,19 +95,25 @@ const App: React.FC = () => {
       setStatusMsg('');
     } 
     else if (msg.type === 'JOIN_REQUEST' && isHost) {
-      console.log("Menerima Join Request dari:", msg.name);
+      console.log("Permintaan bergabung dari:", msg.name, msg.id);
       setPlayers(prev => {
-        if (prev.length >= 5) return prev;
         if (prev.find(p => p.id === msg.id)) return prev;
-        return [...prev, { id: msg.id, name: msg.name, score: 0 }];
+        const newPlayers = [...prev, { id: msg.id, name: msg.name, score: 0 }];
+        // Trigger broadcast segera setelah state diupdate
+        return newPlayers;
       });
-      // Berikan feedback instan ke pemain yang baru bergabung
-      setTimeout(() => broadcastState(), 200);
     }
     else if (msg.type === 'SUBMIT_ANSWER' && isHost) {
-      await processAnswer(msg.answer, msg.playerId);
+      processAnswer(msg.answer, msg.playerId);
     }
-  };
+  }, [isHost]);
+
+  // Efek khusus untuk host membroadcast setiap kali daftar pemain berubah
+  useEffect(() => {
+    if (isHost && screen !== GameScreen.ENTRY) {
+      broadcastState();
+    }
+  }, [players, isHost, broadcastState]);
 
   const createRoom = () => {
     if (!myPlayerName.trim()) return alert("Masukkan namamu!");
@@ -128,7 +121,7 @@ const App: React.FC = () => {
     
     setIsHost(true);
     setConnStatus('connecting');
-    setStatusMsg('Membuka Server Game...');
+    setStatusMsg('Membuat Room...');
     
     const shortCode = generateShortId();
     const peer = new Peer(shortCode, PEER_CONFIG);
@@ -143,30 +136,29 @@ const App: React.FC = () => {
     });
 
     peer.on('connection', (conn) => {
-      console.log("Koneksi masuk:", conn.peer);
+      console.log("Koneksi baru masuk:", conn.peer);
+      
       conn.on('open', () => {
-        connectionsRef.current.push(conn);
-        // Kirim data awal ke pemain baru
-        setTimeout(() => {
-          conn.send({ 
-            type: 'STATE_UPDATE', 
-            state: { players, targetScore, currentPlayerIdx, currentQuestion, screen, winner } 
-          });
-        }, 1500); // Beri waktu ekstra untuk negosiasi TURN
+        // Jangan langsung push, pastikan data channel stabil
+        if (!connectionsRef.current.find(c => c.peer === conn.peer)) {
+          connectionsRef.current.push(conn);
+        }
       });
+
       conn.on('data', (data) => handleIncomingData(data, conn));
+      
       conn.on('close', () => {
-        connectionsRef.current = connectionsRef.current.filter(c => c !== conn);
+        console.log("Pemain keluar:", conn.peer);
+        connectionsRef.current = connectionsRef.current.filter(c => c.peer !== conn.peer);
         setPlayers(prev => prev.filter(p => p.id !== conn.peer));
       });
     });
 
     peer.on('error', (err) => {
-      console.error("Peer Error:", err.type);
       if (err.type === 'unavailable-id') createRoom();
       else {
         setConnStatus('error');
-        alert("Gagal membuat room. Periksa Jaringan.");
+        alert("Gagal membuat room. Periksa koneksi.");
       }
     });
   };
@@ -179,60 +171,65 @@ const App: React.FC = () => {
     
     setIsHost(false);
     setConnStatus('connecting');
-    setStatusMsg('Menghubungi Server Signaling...');
+    setStatusMsg('Menghubungi Host...');
     
     const peer = new Peer(PEER_CONFIG);
     peerRef.current = peer;
 
     peer.on('open', (myId) => {
-      setStatusMsg('Mencari Room ' + code + '...');
-      
-      // Gunakan timeout yang lebih lama untuk jaringan global
-      const conn = peer.connect(code, { 
-        reliable: true,
-        serialization: 'json'
-      });
+      console.log("ID saya:", myId);
+      const conn = peer.connect(code, { reliable: true });
       
       const connectTimeout = setTimeout(() => {
-        if (connStatus !== 'connected' && screen === GameScreen.ENTRY) {
+        if (connStatus !== 'connected') {
           setConnStatus('error');
-          setStatusMsg('Gagal menemukan Host.');
-          alert("Gagal terhubung. Pastikan Kode Room benar dan Host online.");
+          setStatusMsg('Host tidak merespon.');
+          alert("Gagal terhubung. Pastikan Host sudah di layar Lobi.");
         }
-      }, 20000);
+      }, 15000);
 
       conn.on('open', () => {
         clearTimeout(connectTimeout);
+        console.log("Terhubung ke Host!");
         setConnStatus('connected');
-        setStatusMsg('Terhubung! Menyiapkan Lobi...');
+        setStatusMsg('Sinkronisasi...');
         connectionsRef.current = [conn];
         
+        // Pindah layar segera
         setRoomId(code);
         setScreen(GameScreen.LOBBY);
         
-        // Kirim identitas ke Host
-        setTimeout(() => {
-          conn.send({ type: 'JOIN_REQUEST', name: myPlayerName, id: myId });
-        }, 500);
+        // Kirim permintaan join berulang kali untuk memastikan diterima
+        const sendJoin = () => {
+          if (conn.open) {
+            console.log("Mengirim permintaan JOIN...");
+            conn.send({ type: 'JOIN_REQUEST', name: myPlayerName, id: myId });
+          }
+        };
+        
+        sendJoin();
+        // Retry sekali lagi setelah 1 detik jika data pertama terlewat saat channel transisi
+        setTimeout(sendJoin, 1000);
       });
 
       conn.on('data', (data) => handleIncomingData(data));
+      
       conn.on('error', (err) => {
+        console.error("Conn error:", err);
         setConnStatus('error');
-        setStatusMsg('Masalah Firewall Jaringan.');
+        setStatusMsg('Koneksi Gagal.');
       });
+
       conn.on('close', () => {
-        setConnStatus('error');
         setScreen(GameScreen.ENTRY);
-        alert("Koneksi terputus.");
+        alert("Terputus dari room.");
       });
     });
 
     peer.on('error', (err) => {
       setConnStatus('error');
       if (err.type === 'peer-unavailable') {
-        setStatusMsg('Host Tidak Ditemukan.');
-        alert("Room " + code + " tidak online.");
+        alert("Room " + code + " tidak ditemukan.");
       }
     });
   };
@@ -252,39 +249,42 @@ const App: React.FC = () => {
     if (pIdx === -1 || pIdx !== currentPlayerIdx) return;
 
     setIsLoading(true);
-    setMessage(`Mengecek jawaban ${players[pIdx].name}...`);
+    setMessage(`Mengecek jawaban...`);
 
-    const targetTexts = currentQuestion.answers.map(a => a.text);
-    const matchIndex = await checkAnswerSimilarity(answer, targetTexts);
+    const targetAnswers = currentQuestion.answers.map(a => a.text);
+    const matchIndex = await checkAnswerSimilarity(answer, targetAnswers);
 
     if (matchIndex !== null && !currentQuestion.answers[matchIndex].revealed) {
-      const updatedAnswers = [...currentQuestion.answers];
-      updatedAnswers[matchIndex].revealed = true;
-      const updatedPlayers = [...players];
-      updatedPlayers[pIdx].score += 5;
-      const isWinner = updatedPlayers[pIdx].score >= targetScore;
-      
-      if (isWinner) {
-        setWinner(updatedPlayers[pIdx]);
-        setScreen(GameScreen.WINNER);
-        setPlayers(updatedPlayers);
-        setCurrentQuestion({ ...currentQuestion, answers: updatedAnswers });
-      } else if (updatedAnswers.every(a => a.revealed)) {
-        setPlayers(updatedPlayers);
-        setCurrentQuestion({ ...currentQuestion, answers: updatedAnswers });
-        setMessage('🎉 SEMUA TERJAWAB! Ganti pertanyaan...');
-        setTimeout(async () => {
-          const q = await generateDailyQuestion();
-          setCurrentQuestion(q);
-          setCurrentPlayerIdx(prev => (prev + 1) % updatedPlayers.length);
-          setMessage('');
-        }, 2000);
-      } else {
-        setPlayers(updatedPlayers);
-        setCurrentQuestion({ ...currentQuestion, answers: updatedAnswers });
-        setMessage('🎉 TEPAT SEKALI!');
-        setTimeout(() => setMessage(''), 2000);
-      }
+      setPlayers(prev => {
+        const newPlayers = [...prev];
+        newPlayers[pIdx].score += 5;
+        const isWinner = newPlayers[pIdx].score >= targetScore;
+        
+        setCurrentQuestion(q => {
+          if (!q) return q;
+          const newAnswers = [...q.answers];
+          newAnswers[matchIndex].revealed = true;
+          
+          if (isWinner) {
+            setWinner(newPlayers[pIdx]);
+            setScreen(GameScreen.WINNER);
+          } else if (newAnswers.every(a => a.revealed)) {
+            setMessage('🎉 SEMUA TERJAWAB!');
+            setTimeout(async () => {
+              const nextQ = await generateDailyQuestion();
+              setCurrentQuestion(nextQ);
+              setCurrentPlayerIdx(cur => (cur + 1) % newPlayers.length);
+              setMessage('');
+            }, 2000);
+          } else {
+            setMessage('🎉 TEPAT SEKALI!');
+            setTimeout(() => setMessage(''), 2000);
+          }
+          return { ...q, answers: newAnswers };
+        });
+        
+        return newPlayers;
+      });
     } else {
       setMessage('❌ Salah!');
       setTimeout(() => {
@@ -295,15 +295,9 @@ const App: React.FC = () => {
     setIsLoading(false);
   };
 
-  const copyRoomCode = () => {
-    navigator.clipboard.writeText(roomId);
-    setMessage("Kode Berhasil Disalin! ✅");
-    setTimeout(() => setMessage(''), 2000);
-  };
-
   const handleClientSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!userInput.trim()) return;
+    if (!userInput.trim() || isLoading) return;
     if (isHost) processAnswer(userInput, peerRef.current?.id || '');
     else {
       const conn = connectionsRef.current[0];
@@ -314,11 +308,17 @@ const App: React.FC = () => {
     setUserInput('');
   };
 
+  const copyRoomCode = () => {
+    navigator.clipboard.writeText(roomId);
+    setMessage("Kode Berhasil Disalin! ✅");
+    setTimeout(() => setMessage(''), 2000);
+  };
+
   return (
     <div className="max-w-4xl mx-auto p-4 md:p-8 min-h-screen flex flex-col justify-center">
       <header className="text-center mb-8">
         <h1 className="text-5xl md:text-7xl font-fredoka text-white drop-shadow-lg animate-bounce">Family 100</h1>
-        <p className="text-white font-bold tracking-widest mt-2 uppercase opacity-80">Online Global Relay</p>
+        <p className="text-white font-bold tracking-widest mt-2 uppercase opacity-80">Online Multiplayer</p>
       </header>
 
       {screen === GameScreen.ENTRY && !isJoining && (
@@ -333,7 +333,7 @@ const App: React.FC = () => {
           />
           <div className="flex flex-col gap-4">
             <BubbleButton onClick={createRoom} disabled={connStatus === 'connecting'} className="text-xl py-4">
-              {connStatus === 'connecting' ? 'Memulai Server...' : 'Buat Room Baru'}
+              {connStatus === 'connecting' ? 'Menyiapkan...' : 'Buat Room Baru'}
             </BubbleButton>
             <BubbleButton onClick={() => setIsJoining(true)} variant="secondary" className="text-xl py-4">Gabung Room Teman</BubbleButton>
           </div>
@@ -345,7 +345,7 @@ const App: React.FC = () => {
         <BubbleCard className="text-center animate-in slide-in-from-right duration-300 relative">
           <button onClick={() => {setIsJoining(false); setStatusMsg(''); setConnStatus('idle');}} className="absolute left-6 top-6 text-gray-400 font-bold text-2xl">←</button>
           <h2 className="text-2xl font-bold text-gray-800 mb-2 mt-4">Gabung Room</h2>
-          <p className="text-gray-500 mb-6 italic">Gunakan Kode 5 Digit</p>
+          <p className="text-gray-500 mb-6 italic">Masukkan 5 digit kode</p>
           <input
             autoFocus
             type="text"
@@ -356,7 +356,7 @@ const App: React.FC = () => {
             className="w-full bg-blue-50 border-4 border-blue-100 p-5 rounded-[2rem] text-4xl font-fredoka mb-6 text-center outline-none uppercase tracking-[0.5em]"
           />
           <BubbleButton onClick={joinRoom} disabled={connStatus === 'connecting'} variant="secondary" className="w-full text-xl py-4">
-            {connStatus === 'connecting' ? 'MENGHUBUNGI...' : 'GABUNG SEKARANG 🔍'}
+            {connStatus === 'connecting' ? 'MENYAMBUNG...' : 'GABUNG SEKARANG 🔍'}
           </BubbleButton>
           {statusMsg && <p className="mt-4 text-sm text-blue-500 font-bold animate-pulse">{statusMsg}</p>}
         </BubbleCard>
@@ -366,8 +366,8 @@ const App: React.FC = () => {
         <BubbleCard className="animate-in fade-in duration-500">
           <div className="text-center mb-8">
             <p className="text-sm font-bold text-gray-400 uppercase tracking-widest">KODE ROOM:</p>
-            <div className="flex items-center justify-center gap-3 mt-2 group cursor-pointer" onClick={copyRoomCode}>
-              <h2 className="text-5xl md:text-6xl font-fredoka text-blue-500 bg-blue-50 py-5 px-10 rounded-3xl border-4 border-blue-200 tracking-wider shadow-inner group-hover:bg-blue-100 transition-colors">
+            <div className="flex items-center justify-center gap-3 mt-2 cursor-pointer" onClick={copyRoomCode}>
+              <h2 className="text-5xl md:text-6xl font-fredoka text-blue-500 bg-blue-50 py-5 px-10 rounded-3xl border-4 border-blue-200 tracking-wider shadow-inner hover:bg-blue-100 transition-colors">
                 {roomId || '...'}
               </h2>
             </div>
@@ -375,12 +375,18 @@ const App: React.FC = () => {
           </div>
           <div className="space-y-6">
             <div>
-              <label className="block text-sm font-bold text-gray-500 mb-4 uppercase text-center">Pemain Terhubung ({players.length}/5)</label>
+              <label className="block text-sm font-bold text-gray-500 mb-4 uppercase text-center">Pemain ({players.length}/5)</label>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {players.length === 0 && !isHost && (
+                  <div className="col-span-2 text-center py-4 text-gray-400 italic">Menunggu data pemain...</div>
+                )}
                 {players.map((p) => (
                   <div key={p.id} className="flex items-center gap-3 bg-gray-50 p-4 rounded-2xl border-2 border-gray-100">
                     <div className="w-10 h-10 bg-yellow-400 rounded-full flex items-center justify-center font-bold text-yellow-900 border-2 border-white shadow-sm">{p.name[0]}</div>
-                    <span className="font-bold text-gray-700 truncate">{p.name} {p.isHost && '👑'} {p.id === peerRef.current?.id && <span className="text-[10px] text-blue-400 ml-2 font-bold">(ANDA)</span>}</span>
+                    <span className="font-bold text-gray-700 truncate">
+                      {p.name} {p.isHost && '👑'} 
+                      {p.id === peerRef.current?.id && <span className="text-[10px] text-blue-400 ml-2 font-bold">(ANDA)</span>}
+                    </span>
                   </div>
                 ))}
               </div>
@@ -393,11 +399,12 @@ const App: React.FC = () => {
                   ))}
                 </div>
                 <BubbleButton onClick={startGame} className="w-full text-xl py-5" disabled={players.length < 2 || isLoading}>MULAI GAME! 🚀</BubbleButton>
-                {players.length < 2 && <p className="text-[10px] text-center text-gray-400 font-bold uppercase">Ajak temanmu gabung!</p>}
+                {players.length < 2 && <p className="text-[10px] text-center text-gray-400 font-bold uppercase tracking-widest">Ajak temanmu gabung!</p>}
               </div>
             ) : (
               <div className="text-center p-8 bg-yellow-50 rounded-[2.5rem] animate-pulse-soft border-4 border-yellow-100">
-                <p className="font-bold text-yellow-700 text-lg italic">Menunggu Host Memulai Game...</p>
+                <p className="font-bold text-yellow-700 text-lg italic">Menunggu Host Memulai...</p>
+                <p className="text-[10px] text-yellow-600 mt-2 font-bold uppercase opacity-60">Pastikan Host melihat namamu di layar</p>
               </div>
             )}
             {message && <p className="text-center text-green-500 font-bold text-sm animate-bounce">{message}</p>}
@@ -412,6 +419,7 @@ const App: React.FC = () => {
               <div key={p.id} className={`p-3 rounded-[1.5rem] border-4 transition-all flex flex-col items-center min-w-[100px] ${currentPlayerIdx === i ? 'bg-yellow-100 border-yellow-400 scale-105 shadow-lg z-10' : 'bg-white opacity-60 border-white'}`}>
                 <span className="font-fredoka text-base truncate w-full text-center text-gray-800">{p.name}</span>
                 <span className="bg-white px-3 py-1 rounded-full text-xs font-bold mt-1 text-blue-600 shadow-sm">{p.score} pts</span>
+                {currentPlayerIdx === i && <span className="text-[9px] font-bold text-yellow-600 mt-1 animate-pulse">GILIRANNYA!</span>}
               </div>
             ))}
           </div>
@@ -435,13 +443,6 @@ const App: React.FC = () => {
             )}
             {message && <div className="mt-4 text-center font-bold text-lg text-blue-600 animate-bounce">{message}</div>}
           </BubbleCard>
-          <div className="flex justify-between items-center text-white px-4 font-bold text-xs uppercase tracking-widest">
-            <div>TARGET: {targetScore} PTS</div>
-            <div className="flex items-center gap-2">
-              <span className={`w-3 h-3 rounded-full ${connStatus === 'connected' ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`}></span>
-              ROOM: {roomId}
-            </div>
-          </div>
         </div>
       )}
 
@@ -459,7 +460,7 @@ const App: React.FC = () => {
       )}
 
       <footer className="mt-12 text-center text-white opacity-40 text-[10px] font-bold uppercase tracking-widest">
-        {connStatus === 'connected' ? 'Jaringan Stabil ✅' : 'Menghubungkan... ⏳'} | ID: {peerRef.current?.id || '-'}
+        {connStatus === 'connected' ? 'Jaringan Aktif ✅' : 'Koneksi Terputus ❌'} | ID: {peerRef.current?.id || '-'}
       </footer>
     </div>
   );
